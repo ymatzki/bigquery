@@ -1,0 +1,3 @@
+# bq
+
+- lean BigQuery
