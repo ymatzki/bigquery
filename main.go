@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"cloud.google.com/go/bigquery"
 	"google.golang.org/api/googleapi"
@@ -13,11 +16,8 @@ const (
 	datasetName = "bq"
 	location    = "US"
 	tableName   = "test"
+	tmpCsv      = "/tmp/bq.csv"
 )
-
-type TableSchema struct {
-	Name string `bigquery:name`
-}
 
 func main() {
 	projectID, existed := os.LookupEnv("PROJECT_ID")
@@ -40,12 +40,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	t, err := createTable(ctx, *ds)
-	if err != nil {
+
+	if err := createCsv(tmpCsv); err != nil {
 		panic(err)
 	}
-	err = putData(ctx, *t)
-	if err != nil {
+
+	if err := importCsv(ctx, ds.Table(tableName), tmpCsv); err != nil {
 		panic(err)
 	}
 }
@@ -67,35 +67,55 @@ func createDataSet(ctx context.Context, client bigquery.Client) (*bigquery.Datas
 	return ds, nil
 }
 
-func createTable(ctx context.Context, ds bigquery.Dataset) (*bigquery.Table, error) {
-	t := ds.Table(tableName)
-	err := t.Create(ctx, &bigquery.TableMetadata{
-		Name:     tableName,
-		Location: location,
-		Schema: bigquery.Schema{
-			&bigquery.FieldSchema{
-				Name: "name",
-				Type: bigquery.StringFieldType,
-			},
-		},
-	})
-	if err != nil {
-		e, ok := err.(*googleapi.Error)
-		if !ok {
-			return nil, err
-		}
-		if e.Code != http.StatusConflict {
-			return nil, err
-		}
-	}
-	return t, nil
-}
-
-func putData(ctx context.Context, t bigquery.Table) error {
-	items := []*TableSchema{{Name: "foo"}}
-	err := t.Inserter().Put(ctx, items)
+func importCsv(ctx context.Context, t *bigquery.Table, f string) error {
+	file, err := os.Open(filepath.Clean(f))
 	if err != nil {
 		return err
 	}
+	source := bigquery.NewReaderSource(file)
+	source.AutoDetect = true
+	source.SkipLeadingRows = 1
+	loader := t.LoaderFrom(source)
+
+	job, err := loader.Run(ctx)
+	if err != nil {
+		return err
+	}
+	status, err := job.Wait(ctx)
+	if err != nil {
+		return err
+	}
+	if err := status.Err(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func createCsv(f string) error {
+	file, err := os.OpenFile(filepath.Clean(f), os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+	defer closeFile(file)
+
+	err = file.Truncate(0)
+	if err != nil {
+		return err
+	}
+
+	w := csv.NewWriter(file)
+
+	var header = []string{"name"}
+	w.Write(header)
+	w.Write([]string{"foo"})
+	w.Write([]string{"bar"})
+	w.Flush()
+
+	return nil
+}
+
+func closeFile(file *os.File) {
+	if err := file.Close(); err != nil {
+		log.Fatal(err)
+	}
 }
